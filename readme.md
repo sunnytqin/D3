@@ -15,7 +15,7 @@ git clone https://github.com/sunnytqin/D3.git
 cd D3
 ```
 
-The following pacakages are required in your environment:   
+Make sure the following pacakages are installed in your environment:   
 ```
 torch==1.13.1  
 torchvision==0.14.1  
