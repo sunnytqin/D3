@@ -11,7 +11,7 @@ This repo contains code for Distributional Dataset Distillation with Subtask Dec
 
 First, download our repo:
 ```bash
-git clone 
+git clone https://github.com/sunnytqin/D3.git
 cd D3
 ```
 
