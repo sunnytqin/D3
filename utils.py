@@ -9,10 +9,15 @@ import torch.nn.functional as F
 import os
 import kornia as K
 import tqdm
+import pickle
+import copy
+
 from torch.utils.data import Dataset
 from torchvision import datasets, transforms
 from scipy.ndimage.interpolation import rotate as scipyrotate
-from networks import MLP, ConvNet, LeNet, AlexNet, VGG11BN, VGG11, ResNet18, ResNet18BN_AP, ResNet18_AP
+from networks import MLP, ConvNet, LeNet, AlexNet, VGG11BN, VGG11, ResNet18, ResNet18BN_AP, ResNet18_AP, ResNet18_BN, ViT
+from decoder import TinyVAE, VanillaVAE
+
 
 class Config:
     imagenette = [0, 217, 482, 491, 497, 566, 569, 571, 574, 701]
@@ -32,6 +37,40 @@ class Config:
     # ["bee", "ladys slipper", "banana", "lemon", "corn", "school_bus", "honeycomb", "lion", "garden_spider", "goldfinch"]
     imageyellow = [309, 986, 954, 951, 987, 779, 599, 291, 72, 11]
 
+    # Tiny ImageNet into two batches
+    tinyhundred = list(range(0, 100))
+    tinytwohundred = list(range(100, 200))
+
+    # Tiny ImageNet into four batches
+    tinybatch_0= list(range(0, 50))
+    tinybatch_1= list(range(50, 100))
+    tinybatch_2= list(range(100, 150))
+    tinybatch_3= list(range(150, 200))
+
+    # ImageNet into five batches
+    imagebatch_0 = list(range(0, 200))
+    imagebatch_1 = list(range(200, 400))
+    imagebatch_2 = list(range(400, 600))
+    imagebatch_3 = list(range(600, 800))
+    imagebatch_4 = list(range(800, 1000))
+
+    # ImageNet into ten batches
+    imageten_0 = list(range(0, 100))
+    imageten_1 = list(range(100, 200))
+    imageten_2 = list(range(200, 300))
+    imageten_3 = list(range(300, 400))
+    imageten_4 = list(range(400, 500))
+    imageten_5 = list(range(500, 600))
+    imageten_6 = list(range(600, 700))
+    imageten_7 = list(range(700, 800))
+    imageten_8 = list(range(800, 900))
+    imageten_9 = list(range(900, 1000))
+
+    # Imagnet into halfs
+    imagenethalf_0 = list(range(0, 500))
+    imagenethalf_1 = list(range(500, 1000))
+
+
     dict = {
         "imagenette" : imagenette,
         "imagewoof" : imagewoof,
@@ -39,6 +78,30 @@ class Config:
         "imageyellow": imageyellow,
         "imagemeow": imagemeow,
         "imagesquawk": imagesquawk,
+        "tinyhundred": tinyhundred,
+        "tinytwohundred": tinytwohundred,
+        "tinybatch_0": tinybatch_0,
+        "tinybatch_1": tinybatch_1,
+        "tinybatch_2": tinybatch_3,
+        "tinybatch_3": tinybatch_3,
+        "tinyfifty": tinybatch_0,
+        "imagebatch_0": imagebatch_0,
+        "imagebatch_1": imagebatch_1,
+        "imagebatch_2": imagebatch_2,
+        "imagebatch_3": imagebatch_3,
+        "imagebatch_4": imagebatch_4,
+        "imageten_0": imageten_0,
+        "imageten_1": imageten_1,
+        "imageten_2": imageten_2,
+        "imageten_3": imageten_3,
+        "imageten_4": imageten_4,
+        "imageten_5": imageten_5,
+        "imageten_6": imageten_6,
+        "imageten_7": imageten_7,
+        "imageten_8": imageten_8,
+        "imageten_9": imageten_9,
+        "imagenethalf_0": imagenethalf_0,
+        "imagenethalf_1": imagenethalf_1
     }
 
 config = Config()
@@ -65,7 +128,7 @@ def get_dataset(dataset, data_path, batch_size=1, subset="imagenette", args=None
         class_map = {x:x for x in range(num_classes)}
 
 
-    elif dataset == 'Tiny':
+    elif dataset == 'Tiny' and subset == "imagenette":
         channel = 3
         im_size = (64, 64)
         num_classes = 200
@@ -79,6 +142,36 @@ def get_dataset(dataset, data_path, batch_size=1, subset="imagenette", args=None
         dst_test = datasets.ImageFolder(os.path.join(data_path, "val", "images"), transform=transform)
         class_names = dst_train.classes
         class_map = {x:x for x in range(num_classes)}
+
+
+    elif dataset == 'Tiny' and subset != "imagenette":
+        channel = 3
+        im_size = (64, 64)
+
+        config.img_net_classes = config.dict[subset]
+        num_classes = len(config.img_net_classes)
+
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+        if args.zca:
+            transform = transforms.Compose([transforms.ToTensor()])
+        else:
+            transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean=mean, std=std)])
+        dst_train = datasets.ImageFolder(os.path.join(data_path, "train"), transform=transform) # no augmentation
+        dst_train_dict = {c : torch.utils.data.Subset(dst_train, np.squeeze(np.argwhere(np.equal(dst_train.targets, config.img_net_classes[c])))) for c in range(len(config.img_net_classes))}
+        dst_train = torch.utils.data.Subset(dst_train, np.squeeze(np.argwhere(np.isin(dst_train.targets, config.img_net_classes))))
+        loader_train_dict = {c : torch.utils.data.DataLoader(dst_train_dict[c], batch_size=batch_size, shuffle=True, num_workers=16) for c in range(len(config.img_net_classes))}
+        dst_test = datasets.ImageFolder(os.path.join(data_path, "val", "images"), transform=transform)
+        dst_test = torch.utils.data.Subset(dst_test, np.squeeze(np.argwhere(np.isin(dst_test.targets, config.img_net_classes))))
+        for c in range(len(config.img_net_classes)):
+            dst_test.dataset.targets[dst_test.dataset.targets == config.img_net_classes[c]] = c
+            dst_train.dataset.targets[dst_train.dataset.targets == config.img_net_classes[c]] = c
+        class_map = {x: i for i, x in enumerate(config.img_net_classes)}
+        class_map_inv = {i: x for i, x in enumerate(config.img_net_classes)}
+        class_names = None
+
+        # class_names = dst_train.classes
+        # class_map = {x:x for x in range(num_classes)}
 
 
     elif dataset == 'ImageNet':
@@ -100,11 +193,13 @@ def get_dataset(dataset, data_path, batch_size=1, subset="imagenette", args=None
                                             transforms.Resize(im_size),
                                             transforms.CenterCrop(im_size)])
 
-        dst_train = datasets.ImageNet(data_path, split="train", transform=transform) # no augmentation
+        # dst_train = datasets.ImageNet(data_path, split="train", transform=transform) # no augmentation
+        dst_train = datasets.ImageFolder(os.path.join(data_path, "train"), transform=transform) # no augmentation
         dst_train_dict = {c : torch.utils.data.Subset(dst_train, np.squeeze(np.argwhere(np.equal(dst_train.targets, config.img_net_classes[c])))) for c in range(len(config.img_net_classes))}
         dst_train = torch.utils.data.Subset(dst_train, np.squeeze(np.argwhere(np.isin(dst_train.targets, config.img_net_classes))))
         loader_train_dict = {c : torch.utils.data.DataLoader(dst_train_dict[c], batch_size=batch_size, shuffle=True, num_workers=16) for c in range(len(config.img_net_classes))}
-        dst_test = datasets.ImageNet(data_path, split="val", transform=transform)
+        # dst_test = datasets.ImageNet(data_path, split="val", transform=transform)
+        dst_test = datasets.ImageFolder(os.path.join(data_path, "val"), transform=transform) # no augmentation
         dst_test = torch.utils.data.Subset(dst_test, np.squeeze(np.argwhere(np.isin(dst_test.targets, config.img_net_classes))))
         for c in range(len(config.img_net_classes)):
             dst_test.dataset.targets[dst_test.dataset.targets == config.img_net_classes[c]] = c
@@ -113,6 +208,162 @@ def get_dataset(dataset, data_path, batch_size=1, subset="imagenette", args=None
         class_map = {x: i for i, x in enumerate(config.img_net_classes)}
         class_map_inv = {i: x for i, x in enumerate(config.img_net_classes)}
         class_names = None
+
+    # any custom subsets
+    elif dataset == 'ImageNet64' and subset != 'imagenette' and subset != 'testonly':
+        channel = 3
+        im_size = (64, 64)
+        args.res = 64
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+
+        config.img_net_classes = config.dict[subset]
+        num_classes = len(config.img_net_classes)
+
+        # train set 
+        x_train = []
+        y_train = []
+        for idx in range(1, 11):
+
+            data_file = os.path.join(data_path, 'train_data_batch_')
+            
+            with open(data_file + str(idx), 'rb') as fo:
+                d = pickle.load(fo)
+
+            x_train.append(d['data'].reshape(-1, 3, 64, 64))
+            y_train.append(d['labels'])
+
+        x_train = np.concatenate(x_train) 
+        y_train = np.concatenate(y_train) - 1
+
+        subset_index = np.argwhere(np.isin(y_train, config.img_net_classes)).squeeze()
+        x_train = x_train[subset_index]
+        y_train = y_train[subset_index]
+        
+        x_train = torch.from_numpy(x_train).to(torch.float32) / 255. 
+        y_train = torch.from_numpy(y_train)
+
+
+        # validation set 
+        data_file = os.path.join(data_path, 'val_data')
+
+        with open(data_file, 'rb') as fo:
+                d = pickle.load(fo)
+        x_test = d['data'].reshape(-1, 3, 64, 64)
+        y_test = np.array(d['labels']) - 1
+
+        subset_index = np.argwhere(np.isin(y_test, config.img_net_classes)).squeeze()
+        x_test = x_test[subset_index]
+        y_test = y_test[subset_index]
+
+        x_test = torch.from_numpy(x_test).to(torch.float32) / 255. 
+        y_test = torch.as_tensor(y_test)
+
+        mean = [0.485, 0.456, 0.406]
+        std = np.array([0.229, 0.224, 0.225]) 
+
+        y_train_new = torch.zeros_like(y_train)
+        # y_test_new = torch.zeros_like(y_test)
+        for c in range(len(config.img_net_classes)):
+            y_train_new[y_train == config.img_net_classes[c]] = c
+            # y_test_new[y_test == config.img_net_classes[c]] = c
+        y_train = y_train_new
+        # y_test = y_test_new
+
+        data_transforms = transforms.Normalize(mean=mean, std=std)
+        x_train = data_transforms(x_train)
+        dst_train = TensorDataset(copy.deepcopy(x_train.detach()),copy.deepcopy(y_train.detach()))
+
+        data_transforms = transforms.Normalize(mean=mean, std=std)
+        x_test = data_transforms(x_test)
+        dst_test = TensorDataset(x_test.detach(), y_test.detach())
+        class_names = None
+
+        class_map = {x: i for i, x in enumerate(config.img_net_classes)}
+        class_map_inv = {i: x for i, x in enumerate(config.img_net_classes)}
+        class_names = None
+
+    # full dataset
+    elif dataset == 'ImageNet64' and subset == 'imagenette':
+        channel = 3
+        im_size = (64, 64)
+        args.res = 64
+        num_classes = 1000
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+
+        x_train = []
+        y_train = []
+        for idx in range(1, 11):
+
+            data_file = os.path.join(data_path, 'train_data_batch_')
+            
+            with open(data_file + str(idx), 'rb') as fo:
+                d = pickle.load(fo)
+
+            x_train.append(d['data'].reshape(-1, 3, 64, 64))
+            y_train.append(d['labels'])
+
+        x_train = np.concatenate(x_train) 
+        y_train = np.concatenate(y_train) 
+
+        x_train = torch.from_numpy(x_train).to(torch.float32) / 255. 
+        y_train = torch.from_numpy(y_train) - 1
+
+        # validation set 
+        data_file = os.path.join(data_path, 'val_data')
+
+        with open(data_file, 'rb') as fo:
+                d = pickle.load(fo)
+        x_test = d['data'].reshape(-1, 3, 64, 64)
+        y_test = d['labels']
+        x_test = torch.from_numpy(x_test).to(torch.float32) / 255. 
+        y_test = torch.as_tensor(y_test) - 1
+
+        mean = [0.485, 0.456, 0.406]
+        std = np.array([0.229, 0.224, 0.225]) 
+
+        data_transforms = transforms.Normalize(mean=mean, std=std)
+        x_train = data_transforms(x_train)
+        dst_train = TensorDataset(copy.deepcopy(x_train.detach()),copy.deepcopy( y_train.detach()))
+
+        data_transforms = transforms.Normalize(mean=mean, std=std)
+        x_test = data_transforms(x_test)
+        dst_test = TensorDataset(x_test.detach(), y_test.detach())
+        class_names = None
+        class_map = {x: x for x in range(num_classes)}
+
+    # test set only
+    elif dataset == 'ImageNet64' and subset == 'testonly':
+        channel = 3
+        im_size = (64, 64)
+        args.res = 64
+        num_classes = 1000
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+
+        data_file = os.path.join(data_path, 'val_data')
+
+        with open(data_file, 'rb') as fo:
+                d = pickle.load(fo)
+        x_test = d['data'].reshape(-1, 3, 64, 64)
+        y_test = d['labels']
+        x_test = torch.from_numpy(x_test).to(torch.float32) / 255. 
+        y_test = torch.as_tensor(y_test) - 1
+
+        mean = [0.485, 0.456, 0.406]
+        std = np.array([0.229, 0.224, 0.225]) 
+
+        # data_transforms = transforms.Normalize(mean=mean, std=std)
+        # x_train = data_transforms(x_train)
+        # dst_train = TensorDataset(copy.deepcopy(x_train.detach()),copy.deepcopy( y_train.detach()))
+        dst_train = None
+
+        data_transforms = transforms.Normalize(mean=mean, std=std)
+        x_test = data_transforms(x_test)
+        dst_test = TensorDataset(x_test.detach(), y_test.detach())
+        class_names = None
+        class_map = {x: x for x in range(num_classes)}
 
 
     elif dataset.startswith('CIFAR100'):
@@ -185,15 +436,20 @@ class TensorDataset(Dataset):
 
 
 
-def get_default_convnet_setting():
-    net_width, net_depth, net_act, net_norm, net_pooling = 128, 3, 'relu', 'instancenorm', 'avgpooling'
+def get_default_convnet_setting(im_size):
+    if im_size == (32, 32):
+        net_width, net_depth, net_act, net_norm, net_pooling = 128, 3, 'relu', 'instancenorm', 'avgpooling'
+    elif im_size == (64, 64):
+        net_width, net_depth, net_act, net_norm, net_pooling = 128, 4, 'relu', 'instancenorm', 'avgpooling'
+    elif im_size == (128, 128) or im_size == (256, 256):
+        net_width, net_depth, net_act, net_norm, net_pooling = 128, 5, 'relu', 'instancenorm', 'avgpooling'
     return net_width, net_depth, net_act, net_norm, net_pooling
 
 
 
 def get_network(model, channel, num_classes, im_size=(32, 32), dist=True):
     torch.random.manual_seed(int(time.time() * 1000) % 100000)
-    net_width, net_depth, net_act, net_norm, net_pooling = get_default_convnet_setting()
+    net_width, net_depth, net_act, net_norm, net_pooling = get_default_convnet_setting(im_size)
 
     if model == 'MLP':
         net = MLP(channel=channel, num_classes=num_classes)
@@ -202,18 +458,22 @@ def get_network(model, channel, num_classes, im_size=(32, 32), dist=True):
     elif model == 'LeNet':
         net = LeNet(channel=channel, num_classes=num_classes)
     elif model == 'AlexNet':
-        net = AlexNet(channel=channel, num_classes=num_classes)
+        net = AlexNet(channel=channel, num_classes=num_classes, im_size=im_size)
     elif model == 'VGG11':
-        net = VGG11( channel=channel, num_classes=num_classes)
+        net = VGG11( channel=channel, num_classes=num_classes, im_size=im_size)
     elif model == 'VGG11BN':
         net = VGG11BN(channel=channel, num_classes=num_classes)
     elif model == 'ResNet18':
-        net = ResNet18(channel=channel, num_classes=num_classes)
+        net = ResNet18(channel=channel, num_classes=num_classes, im_size=im_size)
     elif model == 'ResNet18BN_AP':
         net = ResNet18BN_AP(channel=channel, num_classes=num_classes)
     elif model == 'ResNet18_AP':
-        net = ResNet18_AP(channel=channel, num_classes=num_classes)
-
+        net = ResNet18_AP(channel=channel, num_classes=num_classes, im_size=im_size)
+    elif model == 'ResNet18_BN':
+        net = ResNet18_BN(channel=channel, num_classes=num_classes, im_size=im_size)
+    elif model == "ViT":
+        net = ViT(image_size = im_size, patch_size = 16, num_classes = num_classes, dim = 512, depth = 10, heads = 8, mlp_dim = 512, dropout = 0.1, emb_dropout = 0.1)
+    
     elif model == 'ConvNetD1':
         net = ConvNet(channel=channel, num_classes=num_classes, net_width=net_width, net_depth=1, net_act=net_act, net_norm=net_norm, net_pooling=net_pooling, im_size=im_size)
     elif model == 'ConvNetD2':
@@ -296,12 +556,96 @@ def get_network(model, channel, num_classes, im_size=(32, 32), dist=True):
 def get_time():
     return str(time.strftime("[%Y-%m-%d %H:%M:%S]", time.localtime()))
 
+def get_memory(message):  
+    # get the maximum GPU memory allocated by PyTorch
+    max_memory_allocated = torch.cuda.memory_allocated()
+
+    # print the result
+    print(f"{message}, GPU memory allocated: {max_memory_allocated / 1024**3:.2f} GB")
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 def epoch(mode, dataloader, net, optimizer, criterion, args, aug, texture=False):
     loss_avg, acc_avg, num_exp = 0, 0, 0
-    net = net.to(args.device)
+    # print("net device: ", net.device)
+    # net.to(args.device)
 
-    if args.dataset == "ImageNet":
+    if (args.subset != "imagenette" and args.subset != "testonly"):
+        class_map = {x: i for i, x in enumerate(config.img_net_classes)}
+
+    if mode == 'train':
+        net.train()
+    else:
+        net.eval()
+
+    for i_batch, datum in enumerate(dataloader):
+        latent = datum[0].float().to(args.device)
+        # label data type depends on whether soft label is used
+        if args.soft_label:
+            lab = datum[1].to(args.device)
+        else:
+            lab = datum[1].long().to(args.device)
+
+        if mode == "train" and texture:
+            latent = torch.cat([torch.stack([torch.roll(im, (torch.randint(args.im_size[0]*args.canvas_size, (1,)), torch.randint(args.im_size[0]*args.canvas_size, (1,))), (1,2))[:,:args.im_size[0],:args.im_size[1]] for im in img]) for _ in range(args.canvas_samples)])
+            lab = torch.cat([lab for _ in range(args.canvas_samples)])
+
+        if aug:
+            if args.dsa:
+                if isinstance(args.decoder, TinyVAE) or isinstance(args.decoder, VanillaVAE):
+                    if args.forward_fixed:
+                        img = args.decoder.forward_fixed(latent)
+                    elif args.soft_label:
+                        img_fixed = args.decoder.forward_fixed(latent) 
+                        img_var = args.decoder.forward(latent) 
+                        img = torch.concat([img_fixed, img_var])
+                        # turn hard label to soft label
+                        lab = torch.cat([lab[:, i, :] for i in range(2)])
+                    else:
+                        img = args.decoder(latent)
+                    # then perform diff aug
+                    img = DiffAugment(img, args.dsa_strategy, param=ParamDiffAug())
+                elif isinstance(args.decoder, list):
+                    raise ValueError("Decoder is a list, use eval_federated.py")
+                else:
+                    img = DiffAugment(img, args.dsa_strategy, param=args.decoder)
+            else:
+                img = augment(img, args.dc_aug_param, device=args.device)
+        else: # testloader direclty loads images (no additional augmentation of decoding)
+            img = latent
+
+        if (args.subset != "imagenette" and args.subset != "testonly" and mode != "train"):
+            lab = torch.tensor([class_map[x.item()] for x in lab]).to(args.device)
+
+        n_b = lab.shape[0]
+
+        output = net(img)
+        loss = criterion(output, lab)
+
+        if mode == 'train' and args.soft_label:
+            acc = np.sum(np.equal(np.argmax(output.cpu().data.numpy(), axis=-1), np.argmax(lab.cpu().data.numpy(), axis=-1)))
+        else:
+            acc = np.sum(np.equal(np.argmax(output.cpu().data.numpy(), axis=-1), lab.cpu().data.numpy()))
+
+        loss_avg += loss.item()*n_b
+        acc_avg += acc
+        num_exp += n_b
+
+        if mode == 'train':
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+    loss_avg /= num_exp
+    acc_avg /= num_exp
+
+    return loss_avg, acc_avg
+
+def epoch_batch(mode, dataloader, net, optimizer, criterion, args, aug, texture=False):
+    loss_avg, acc_avg, num_exp = 0, 0, 0
+
+    if (args.subset != "imagenette" and args.subset != "testonly"):
         class_map = {x: i for i, x in enumerate(config.img_net_classes)}
 
     if mode == 'train':
@@ -311,7 +655,7 @@ def epoch(mode, dataloader, net, optimizer, criterion, args, aug, texture=False)
 
     for i_batch, datum in enumerate(dataloader):
         img = datum[0].float().to(args.device)
-        lab = datum[1].long().to(args.device)
+        lab = datum[1].to(args.device)
 
         if mode == "train" and texture:
             img = torch.cat([torch.stack([torch.roll(im, (torch.randint(args.im_size[0]*args.canvas_size, (1,)), torch.randint(args.im_size[0]*args.canvas_size, (1,))), (1,2))[:,:args.im_size[0],:args.im_size[1]] for im in img]) for _ in range(args.canvas_samples)])
@@ -319,11 +663,11 @@ def epoch(mode, dataloader, net, optimizer, criterion, args, aug, texture=False)
 
         if aug:
             if args.dsa:
-                img = DiffAugment(img, args.dsa_strategy, param=args.dsa_param)
+                img = DiffAugment(img, args.dsa_strategy, param=ParamDiffAug())
             else:
                 img = augment(img, args.dc_aug_param, device=args.device)
 
-        if args.dataset == "ImageNet" and mode != "train":
+        if (args.subset != "imagenette" and args.subset != "testonly" and mode != "train"):
             lab = torch.tensor([class_map[x.item()] for x in lab]).to(args.device)
 
         n_b = lab.shape[0]
@@ -331,7 +675,11 @@ def epoch(mode, dataloader, net, optimizer, criterion, args, aug, texture=False)
         output = net(img)
         loss = criterion(output, lab)
 
-        acc = np.sum(np.equal(np.argmax(output.cpu().data.numpy(), axis=-1), lab.cpu().data.numpy()))
+        # acc = np.sum(np.equal(np.argmax(output.cpu().data.numpy(), axis=-1), lab.cpu().data.numpy()))
+        if mode == 'train' and args.soft_label:
+            acc = np.sum(np.equal(np.argmax(output.cpu().data.numpy(), axis=-1), np.argmax(datum[1].cpu().data.numpy(), axis=-1)))
+        else:
+            acc = np.sum(np.equal(np.argmax(output.cpu().data.numpy(), axis=-1), lab.cpu().data.numpy()))
 
         loss_avg += loss.item()*n_b
         acc_avg += acc
@@ -349,9 +697,9 @@ def epoch(mode, dataloader, net, optimizer, criterion, args, aug, texture=False)
 
 
 
-def evaluate_synset(it_eval, net, images_train, labels_train, testloader, args, return_loss=False, texture=False):
+def evaluate_synset(it_eval, net, latents_train, labels_train, testloader, args, return_loss=False, texture=False):
     net = net.to(args.device)
-    images_train = images_train.to(args.device)
+    latents_train = latents_train.to(args.device)
     labels_train = labels_train.to(args.device)
     lr = float(args.lr_net)
     Epoch = int(args.epoch_eval_train)
@@ -360,7 +708,7 @@ def evaluate_synset(it_eval, net, images_train, labels_train, testloader, args, 
 
     criterion = nn.CrossEntropyLoss().to(args.device)
 
-    dst_train = TensorDataset(images_train, labels_train)
+    dst_train = TensorDataset(latents_train, labels_train)
     trainloader = torch.utils.data.DataLoader(dst_train, batch_size=args.batch_train, shuffle=True, num_workers=0)
 
     start = time.time()
@@ -368,10 +716,11 @@ def evaluate_synset(it_eval, net, images_train, labels_train, testloader, args, 
     loss_train_list = []
 
     for ep in tqdm.tqdm(range(Epoch+1)):
-        loss_train, acc_train = epoch('train', trainloader, net, optimizer, criterion, args, aug=True, texture=texture)
+        loss_train, acc_train = epoch('train', trainloader, net, optimizer, criterion, args, aug=not args.no_aug, texture=texture)
         acc_train_list.append(acc_train)
         loss_train_list.append(loss_train)
-        if ep == Epoch:
+        # if ep == Epoch:
+        if ep % 200 == 0:
             with torch.no_grad():
                 loss_test, acc_test = epoch('test', testloader, net, optimizer, criterion, args, aug=False)
         if ep in lr_schedule:
@@ -387,6 +736,89 @@ def evaluate_synset(it_eval, net, images_train, labels_train, testloader, args, 
         return net, acc_train_list, acc_test, loss_train_list, loss_test
     else:
         return net, acc_train_list, acc_test
+
+
+def evaluate_synset_batch(it_eval, net, latents_train, labels_train, testloader, args, return_loss=False, texture=False, newset_only=False):
+    net = net.to(args.device)
+
+    lr = float(args.lr_net)
+    Epoch = int(args.epoch_eval_train)
+    lr_schedule = [Epoch//2+1] 
+    optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=0.0005)
+
+    criterion = nn.CrossEntropyLoss().to(args.device)
+
+    start = time.time()
+    acc_train_list = []
+    loss_train_list = []
+    acc_test_max = 0.0
+
+    if args.soft_label and args.lpc < 10:
+        images_train_fixed = []
+        labels_train_fixed = []
+        for i in range(len(args.decoder)):
+            images_train_fixed.append(args.decoder[i].forward_fixed(latents_train[i]).detach())
+            labels_train_fixed.append(labels_train[i][:, 0, :].detach())
+        images_train_fixed = torch.cat(images_train_fixed).to(args.device)
+        labels_train_fixed = torch.cat(labels_train_fixed).to(args.device)
+
+
+    for ep in tqdm.tqdm(range(Epoch+1)):
+        # assume we have a list of images and labels
+        if args.soft_label and args.lpc < 10:
+            images_train_decoded = []
+            labels_train_decoded = []
+            for i in range(len(args.decoder)):
+                images_train_decoded.append(args.decoder[i](latents_train[i]).detach())
+                labels_train_decoded.append(labels_train[i][:, 0, :].detach()) 
+            images_train_decoded = torch.cat([images_train_fixed, *images_train_decoded]).to(args.device)
+            labels_train_decoded = torch.cat([labels_train_fixed, *labels_train_decoded]).to(args.device)
+        elif args.soft_label and args.lpc >= 10:
+            images_train_decoded = []
+            labels_train_decoded = []
+            for i in range(len(args.decoder)):
+                images_train_decoded.append(args.decoder[i].forward_fixed(latents_train[i]).detach())
+                labels_train_decoded.append(labels_train[i][:, 0, :].detach())
+                images_train_decoded.append(args.decoder[i](latents_train[i]).detach())
+                labels_train_decoded.append(labels_train[i][:, 0, :].detach())
+            images_train_decoded = torch.cat(images_train_decoded).to(args.device)
+            labels_train_decoded = torch.cat(labels_train_decoded).to(args.device)
+
+        else: # no soft label
+            images_train_decoded = []
+            labels_train_decoded = []
+            for i in range(len(args.decoder)):
+                images_train_decoded.append(args.decoder[i](latents_train[i]).detach())
+                labels_train_decoded.append(labels_train[i].detach())
+            images_train_decoded = torch.cat(images_train_decoded).to(args.device)
+            labels_train_decoded = torch.cat(labels_train_decoded).to(args.device)
+                
+        dst_train = TensorDataset(images_train_decoded, labels_train_decoded)
+        del images_train_decoded, labels_train_decoded
+        torch.cuda.empty_cache()
+        trainloader = torch.utils.data.DataLoader(dst_train, batch_size=args.batch_train, shuffle=True, num_workers=0)
+
+        loss_train, acc_train = epoch_batch('train', trainloader, net, optimizer, criterion, args, aug=not args.no_aug, texture=texture)
+        acc_train_list.append(acc_train)
+        loss_train_list.append(loss_train)
+        if ep %200==0 or ep== Epoch:
+            with torch.no_grad():
+                loss_test, acc_test = epoch_batch('test', testloader, net, optimizer, criterion, args, aug=False)
+                print('    train loss = %.6f train acc = %.4f, test acc = %.4f' % (loss_train, acc_train, acc_test))
+                if acc_test_max < acc_test: acc_test_max = acc_test
+        if ep in lr_schedule:
+            lr *= 0.1
+            optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=0.0005)
+
+
+    time_train = time.time() - start
+
+    print('%s Evaluate_%02d: epoch = %04d train time = %d s train loss = %.6f train acc = %.4f, test acc = %.4f' % (get_time(), it_eval, Epoch, int(time_train), loss_train, acc_train, acc_test))
+
+    if return_loss:
+        return net, acc_train_list, acc_test, loss_train_list, loss_test
+    else:
+        return net, acc_train_list, acc_test_max
 
 
 def augment(images, dc_aug_param, device):
@@ -474,9 +906,9 @@ def get_daparam(dataset, model, model_eval, ipc):
 
 def get_eval_pool(eval_mode, model, model_eval):
     if eval_mode == 'M': # multiple architectures
-        # model_eval_pool = ['MLP', 'ConvNet', 'AlexNet', 'VGG11', 'ResNet18', 'LeNet']
-        model_eval_pool = ['ConvNet', 'AlexNet', 'VGG11', 'ResNet18_AP', 'ResNet18']
-        # model_eval_pool = ['MLP', 'ConvNet', 'AlexNet', 'VGG11', 'ResNet18']
+        model_eval_pool = [model, 'VGG11', 'ResNet18_AP', 'AlexNet', 'ViT']
+    elif eval_mode == 'R': # R18
+        model_eval_pool = ['ResNet18_AP']
     elif eval_mode == 'W': # ablation study on network width
         model_eval_pool = ['ConvNetW32', 'ConvNetW64', 'ConvNetW128', 'ConvNetW256']
     elif eval_mode == 'D': # ablation study on network depth

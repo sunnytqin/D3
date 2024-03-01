@@ -1,6 +1,9 @@
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
+
+from einops import rearrange, repeat
+from einops.layers.torch import Rearrange
 # Acknowledgement to
 # https://github.com/kuangliu/pytorch-cifar,
 # https://github.com/BIGBALLON/CIFAR-ZOO,
@@ -30,14 +33,20 @@ class ConvNet(nn.Module):
     def __init__(self, channel, num_classes, net_width, net_depth, net_act, net_norm, net_pooling, im_size = (32,32)):
         super(ConvNet, self).__init__()
 
-        self.features, shape_feat = self._make_layers(channel, net_width, net_depth, net_norm, net_act, net_pooling, im_size)
+        self.features_a, self.features_b, shape_feat = self._make_layers(channel, net_width, net_depth, net_norm, net_act, net_pooling, im_size)
         num_feat = shape_feat[0]*shape_feat[1]*shape_feat[2]
         self.classifier = nn.Linear(num_feat, num_classes)
 
-    def forward(self, x):
+    def forward(self, x, feature_only=False):
         # print("MODEL DATA ON: ", x.get_device(), "MODEL PARAMS ON: ", self.classifier.weight.data.get_device())
-        out = self.features(x)
+        out = self.features_a(x)
+        if feature_only == 1:
+            out = out.view(out.size(0), -1)
+            return out
+        out = self.features_b(out)
         out = out.view(out.size(0), -1)
+        if feature_only == 2:
+            return out
         out = self.classifier(out)
         return out
 
@@ -95,7 +104,7 @@ class ConvNet(nn.Module):
                 shape_feat[2] //= 2
 
 
-        return nn.Sequential(*layers), shape_feat
+        return nn.Sequential(*layers[0: len(layers)//2+1]), nn.Sequential(*layers[len(layers)//2+1: ]), shape_feat
 
 
 ''' ConvNet '''
@@ -200,7 +209,7 @@ class LeNet(nn.Module):
 
 ''' AlexNet '''
 class AlexNet(nn.Module):
-    def __init__(self, channel, num_classes):
+    def __init__(self, channel, im_size, num_classes):
         super(AlexNet, self).__init__()
         self.features = nn.Sequential(
             nn.Conv2d(channel, 128, kernel_size=5, stride=1, padding=4 if channel==1 else 2),
@@ -217,12 +226,18 @@ class AlexNet(nn.Module):
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2),
         )
-        self.fc = nn.Linear(192 * 4 * 4, num_classes)
+        shape_feat = [192, im_size[0]//(2**3), im_size[0]//(2**3)]
+        num_features = shape_feat[0]*shape_feat[1]*shape_feat[2]
 
+        self.fc = nn.Linear(num_features, num_classes)
+        
     def forward(self, x):
         x = self.features(x)
+        # x = self.avgpool(x)
         x = x.view(x.size(0), -1)
         x = self.fc(x)
+        # logits = self.classifier(x)
+        # return logits
         return x
 
 
@@ -235,11 +250,14 @@ cfg_vgg = {
     'VGG19': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 256, 'M', 512, 512, 512, 512, 'M', 512, 512, 512, 512, 'M'],
 }
 class VGG(nn.Module):
-    def __init__(self, vgg_name, channel, num_classes, norm='instancenorm'):
+    def __init__(self, vgg_name, channel, im_size, num_classes, norm='instancenorm'):
         super(VGG, self).__init__()
         self.channel = channel
+        self.shape_feat = [None, im_size[0], im_size[1]]
         self.features = self._make_layers(cfg_vgg[vgg_name], norm)
-        self.classifier = nn.Linear(512 if vgg_name != 'VGGS' else 128, num_classes)
+        num_features = self.shape_feat[0] * self.shape_feat[1] * self.shape_feat[2]
+
+        self.classifier = nn.Linear(num_features if vgg_name != 'VGGS' else 128, num_classes)
 
     def forward(self, x):
         x = self.features(x)
@@ -253,25 +271,28 @@ class VGG(nn.Module):
         for ic, x in enumerate(cfg):
             if x == 'M':
                 layers += [nn.MaxPool2d(kernel_size=2, stride=2)]
+                self.shape_feat[1] = self.shape_feat[1]//2
+                self.shape_feat[2] = self.shape_feat[2]//2
             else:
                 layers += [nn.Conv2d(in_channels, x, kernel_size=3, padding=3 if self.channel==1 and ic==0 else 1),
                            nn.GroupNorm(x, x, affine=True) if norm=='instancenorm' else nn.BatchNorm2d(x),
                            nn.ReLU(inplace=True)]
                 in_channels = x
+                self.shape_feat[0] = x
         layers += [nn.AvgPool2d(kernel_size=1, stride=1)]
         return nn.Sequential(*layers)
 
 
-def VGG11(channel, num_classes):
-    return VGG('VGG11', channel, num_classes)
+def VGG11(channel, im_size, num_classes):
+    return VGG('VGG11', channel, im_size, num_classes)
 def VGG11BN(channel, num_classes):
     return VGG('VGG11', channel, num_classes, norm='batchnorm')
-def VGG13(channel, num_classes):
-    return VGG('VGG13', channel, num_classes)
-def VGG16(channel, num_classes):
-    return VGG('VGG16', channel, num_classes)
-def VGG19(channel, num_classes):
-    return VGG('VGG19', channel, num_classes)
+def VGG13(channel, im_size, num_classes):
+    return VGG('VGG13', channel, im_size, num_classes)
+def VGG16(channel, im_size, num_classes):
+    return VGG('VGG16', channel, im_size, num_classes)
+def VGG19(channel, im_size, num_classes):
+    return VGG('VGG19', channel, im_size, num_classes)
 
 
 ''' ResNet_AP '''
@@ -341,7 +362,7 @@ class Bottleneck_AP(nn.Module):
 
 
 class ResNet_AP(nn.Module):
-    def __init__(self, block, num_blocks, channel=3, num_classes=10, norm='instancenorm'):
+    def __init__(self, block, num_blocks, channel=3, im_size=(32, 32), num_classes=10, norm='instancenorm'):
         super(ResNet_AP, self).__init__()
         self.in_planes = 64
         self.norm = norm
@@ -352,8 +373,8 @@ class ResNet_AP(nn.Module):
         self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
         self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
         self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
-        self.classifier = nn.Linear(512 * block.expansion * 3 * 3 if channel==1 else 512 * block.expansion * 4 * 4, num_classes)  # modification
-
+        self.classifier = nn.Linear(512 * block.expansion * 3 * 3 if channel==1 else 512 * block.expansion * im_size[0]//(2**3) * im_size[1]//(2**3), num_classes)  # modification
+    
     def _make_layer(self, block, planes, num_blocks, stride):
         strides = [stride] + [1] * (num_blocks - 1)
         layers = []
@@ -377,8 +398,15 @@ class ResNet_AP(nn.Module):
 def ResNet18BN_AP(channel, num_classes):
     return ResNet_AP(BasicBlock_AP, [2,2,2,2], channel=channel, num_classes=num_classes, norm='batchnorm')
 
-def ResNet18_AP(channel, num_classes):
-    return ResNet_AP(BasicBlock_AP, [2,2,2,2], channel=channel, num_classes=num_classes)
+def ResNet18_AP(channel, im_size, num_classes):
+    return ResNet_AP(BasicBlock_AP, [2,2,2,2], channel=channel, im_size=im_size, num_classes=num_classes)
+
+def ResNet18(channel, im_size, num_classes):
+    return ResNet_AP(BasicBlock_AP, [2,2,2,2], channel=channel, im_size=im_size, num_classes=num_classes)
+
+def ResNet18_BN(channel, im_size, num_classes):
+    return ResNet_AP(BasicBlock_AP, [2,2,2,2], channel=channel, im_size=im_size, num_classes=num_classes, norm='batchnorm')
+
 
 
 ''' ResNet '''
@@ -514,8 +542,8 @@ class ResNetImageNet(nn.Module):
 def ResNet18BN(channel, num_classes):
     return ResNet(BasicBlock, [2,2,2,2], channel=channel, num_classes=num_classes, norm='batchnorm')
 
-def ResNet18(channel, num_classes):
-    return ResNet(BasicBlock, [2,2,2,2], channel=channel, num_classes=num_classes)
+# def ResNet18(channel, num_classes):
+#     return ResNet(BasicBlock, [2,2,2,2], channel=channel, num_classes=num_classes)
 
 def ResNet34(channel, num_classes):
     return ResNet(BasicBlock, [3,4,6,3], channel=channel, num_classes=num_classes)
@@ -534,3 +562,132 @@ def ResNet18ImageNet(channel, num_classes):
 
 def ResNet6ImageNet(channel, num_classes):
     return ResNetImageNet(BasicBlock, [1,1,1,1], channel=channel, num_classes=num_classes)
+
+
+# https://github.com/lucidrains/vit-pytorch/blob/main/vit_pytorch/vit.py
+
+
+# helpers
+
+def pair(t):
+    return t if isinstance(t, tuple) else (t, t)
+
+# classes
+
+class PreNorm(nn.Module):
+    def __init__(self, dim, fn):
+        super().__init__()
+        # self.norm = nn.LayerNorm(dim)
+        self.fn = fn
+    def forward(self, x, **kwargs):
+        # return self.fn(self.norm(x), **kwargs)
+        return self.fn(x, **kwargs)
+
+class FeedForward(nn.Module):
+    def __init__(self, dim, hidden_dim, dropout = 0.):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, dim),
+            nn.Dropout(dropout)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+class Attention(nn.Module):
+    def __init__(self, dim, heads = 8, dim_head = 64, dropout = 0.):
+        super().__init__()
+        inner_dim = dim_head *  heads
+        project_out = not (heads == 1 and dim_head == dim)
+
+        self.heads = heads
+        self.scale = dim_head ** -0.5
+
+        self.attend = nn.Softmax(dim = -1)
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
+
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, dim),
+            nn.Dropout(dropout)
+        ) if project_out else nn.Identity()
+
+    def forward(self, x):
+        qkv = self.to_qkv(x).chunk(3, dim = -1)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), qkv)
+
+        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+
+        attn = self.attend(dots)
+
+        out = torch.matmul(attn, v)
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
+
+class Transformer(nn.Module):
+    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout = 0.):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                PreNorm(dim, Attention(dim, heads = heads, dim_head = dim_head, dropout = dropout)),
+                PreNorm(dim, FeedForward(dim, mlp_dim, dropout = dropout))
+            ]))
+    def forward(self, x):
+        for attn, ff in self.layers:
+            x = attn(x) + x
+            x = ff(x) + x
+        return x
+
+class ViT(nn.Module):
+    def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, pool = 'cls', channels = 3, dim_head = 64, dropout = 0., emb_dropout = 0.):
+        super().__init__()
+        image_height, image_width = pair(image_size)
+        patch_height, patch_width = pair(patch_size)
+
+        assert image_height % patch_height == 0 and image_width % patch_width == 0, 'Image dimensions must be divisible by the patch size.'
+
+        num_patches = (image_height // patch_height) * (image_width // patch_width)
+        patch_dim = channels * patch_height * patch_width
+        assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
+
+        self.to_patch_embedding = nn.Sequential(
+            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_height, p2 = patch_width),
+            nn.Linear(patch_dim, dim),
+        )
+
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim))
+        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
+        self.dropout = nn.Dropout(emb_dropout)
+
+        self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, dropout)
+
+        self.pool = pool
+        self.to_latent = nn.Identity()
+
+        self.mlp_head = nn.Sequential(
+            # nn.LayerNorm(dim),
+            nn.Linear(dim, num_classes)
+        )
+
+    def forward(self, img):
+        x = self.to_patch_embedding(img)
+        b, n, _ = x.shape
+
+        cls_tokens = repeat(self.cls_token, '() n d -> b n d', b = b)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x += self.pos_embedding[:, :(n + 1)]
+        x = self.dropout(x)
+
+        x = self.transformer(x)
+
+        x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
+
+        x = self.to_latent(x)
+
+        feat_fc = x
+
+        x = self.mlp_head(x)
+
+        return x

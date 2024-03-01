@@ -3,9 +3,9 @@ import argparse
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from utils import get_dataset, get_network, get_daparam,\
-    TensorDataset, epoch, ParamDiffAug
+from utils import get_dataset, get_network, get_daparam, TensorDataset, epoch, ParamDiffAug
 import copy
+from datetime import datetime
 
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -13,7 +13,7 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 def main(args):
 
     args.dsa = True if args.dsa == 'True' else False
-    args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    args.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     args.dsa_param = ParamDiffAug()
 
     channel, im_size, num_classes, class_names, mean, std, dst_train, dst_test, testloader, loader_train_dict, class_map, class_map_inv = get_dataset(args.dataset, args.data_path, args.batch_real, args.subset, args=args)
@@ -22,8 +22,10 @@ def main(args):
     print('Hyper-parameters: \n', args.__dict__)
 
     save_dir = os.path.join(args.buffer_path, args.dataset)
-    if args.dataset == "ImageNet":
+    if args.dataset == "ImageNet" or args.dataset == "ImageNet64":
         save_dir = os.path.join(save_dir, args.subset, str(args.res))
+    if args.dataset == "Tiny" and args.subset != "imagenette":
+        save_dir = os.path.join(save_dir, args.subset)
     if args.dataset in ["CIFAR10", "CIFAR100"] and not args.zca:
         save_dir += "_NO_ZCA"
     save_dir = os.path.join(save_dir, args.model)
@@ -36,16 +38,34 @@ def main(args):
     labels_all = []
     indices_class = [[] for c in range(num_classes)]
     print("BUILDING DATASET")
-    for i in tqdm(range(len(dst_train))):
-        sample = dst_train[i]
-        images_all.append(torch.unsqueeze(sample[0], dim=0))
-        labels_all.append(class_map[torch.tensor(sample[1]).item()])
+    if args.dataset != "ImageNet64":
+        images_all = []
+        labels_all = []
+        indices_class = [[] for c in range(num_classes)]
+        print("BUILDING DATASET")
+        for i in tqdm(range(len(dst_train))):
+            sample = dst_train[i]
+            images_all.append(torch.unsqueeze(sample[0], dim=0))
+            labels_all.append(class_map[torch.tensor(sample[1]).item()])
+        for i, lab in tqdm(enumerate(labels_all)):
+            indices_class[lab].append(i)
+    
+        images_all = torch.cat(images_all, dim=0).to("cpu")
+        labels_all = torch.tensor(labels_all, dtype=torch.long, device="cpu")
+    elif args.dataset == "ImageNet64":
+        images_all = dst_train.images.detach()
+        labels_all = dst_train.labels.detach()
+        indices_class = [[] for c in range(num_classes)]
 
-    for i, lab in tqdm(enumerate(labels_all)):
-        indices_class[lab].append(i)
-    images_all = torch.cat(images_all, dim=0).to("cpu")
-    labels_all = torch.tensor(labels_all, dtype=torch.long, device="cpu")
+        for i, lab in tqdm(enumerate(labels_all)):
+            indices_class[lab].append(i)
+    
+        images_all = images_all.to("cpu")
+        labels_all = labels_all.to("cpu")
+    else: 
+        raise AssertionError("Invalid dataset")
 
+    
     for c in range(num_classes):
         print('class c = %d: %d real images'%(c, len(indices_class[c])))
 
@@ -56,6 +76,7 @@ def main(args):
 
     trajectories = []
 
+    # dst_train = TensorDataset(copy.deepcopy(dst_train.images.detach()), copy.deepcopy(dst_train.labels.detach()))
     dst_train = TensorDataset(copy.deepcopy(images_all.detach()), copy.deepcopy(labels_all.detach()))
     trainloader = torch.utils.data.DataLoader(dst_train, batch_size=args.batch_train, shuffle=True, num_workers=0)
 
@@ -67,7 +88,7 @@ def main(args):
     for it in range(0, args.num_experts):
 
         ''' Train synthetic data '''
-        teacher_net = get_network(args.model, channel, num_classes, im_size).to(args.device) # get a random model
+        teacher_net = get_network(args.model, channel, num_classes, im_size, dist=False).to(args.device) # get a random model
         teacher_net.train()
         lr = args.lr_teacher
         teacher_optim = torch.optim.SGD(teacher_net.parameters(), lr=lr, momentum=args.mom, weight_decay=args.l2)  # optimizer_img for synthetic data
@@ -84,10 +105,13 @@ def main(args):
             train_loss, train_acc = epoch("train", dataloader=trainloader, net=teacher_net, optimizer=teacher_optim,
                                         criterion=criterion, args=args, aug=True)
 
-            test_loss, test_acc = epoch("test", dataloader=testloader, net=teacher_net, optimizer=None,
+            if e == args.train_epochs - 1:
+                test_loss, test_acc = epoch("test", dataloader=testloader, net=teacher_net, optimizer=None,
                                         criterion=criterion, args=args, aug=False)
 
-            print("Itr: {}\tEpoch: {}\tTrain Acc: {}\tTest Acc: {}".format(it, e, train_acc, test_acc))
+                print("Itr: {}\tEpoch: {}\tTrain Acc: {}\tTest Acc: {}".format(it, e, train_acc, test_acc))
+
+            print(datetime.now(), "Itr: {}\tEpoch: {}\tTrain Acc: {}".format(it, e, train_acc))
 
             timestamps.append([p.detach().cpu() for p in teacher_net.parameters()])
 
@@ -128,6 +152,7 @@ if __name__ == '__main__':
     parser.add_argument('--mom', type=float, default=0, help='momentum')
     parser.add_argument('--l2', type=float, default=0, help='l2 regularization')
     parser.add_argument('--save_interval', type=int, default=10)
+    parser.add_argument('--soft_label', action='store_true', help="not used here")
 
     args = parser.parse_args()
     main(args)
