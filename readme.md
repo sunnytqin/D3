@@ -5,7 +5,7 @@
 
 This repo contains code for Distributional Dataset Distillation with Subtask Decomposition. 
 
-<img src='docs/D3_demo.png' width=600>
+<img src='docs/D3_demo.png' width=600 img align="center">
 
 ## Basic Setup
 
